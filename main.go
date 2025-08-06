@@ -1,13 +1,8 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 	"time"
 
 	"rss-en-to-jp-notification/config"
@@ -20,10 +15,6 @@ type App struct {
 	feedService         *service.FeedService
 	translatorService   *service.TranslatorService
 	notificationService *service.NotificationService
-	
-	// アプリケーション状態
-	running bool
-	mutex   sync.RWMutex
 }
 
 func main() {
@@ -31,7 +22,7 @@ func main() {
 
 	// 設定を読み込み
 	cfg := config.LoadConfig()
-	log.Printf("設定読み込み完了: フィードURL=%s, チェック間隔=%v", cfg.FeedURL, cfg.CheckInterval)
+	log.Printf("設定読み込み完了: フィードURL数=%d, 最大記事数/フィード=%d", len(cfg.FeedURLs), cfg.MaxArticlesPerFeed)
 
 	// アプリケーションを初期化
 	app := NewApp(cfg)
@@ -41,20 +32,8 @@ func main() {
 		log.Fatalf("接続テストに失敗しました: %v", err)
 	}
 
-	// 起動通知を送信
-	if err := app.notificationService.SendStartupNotification(); err != nil {
-		log.Printf("起動通知の送信に失敗しました: %v", err)
-	}
-
-	// メインループを開始
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// シグナルハンドリング
-	go app.handleSignals(cancel)
-
-	// メインループを実行
-	app.Run(ctx)
+	// メイン処理を実行（一回だけ）
+	app.RunOnce()
 
 	log.Println("RSS通知システムを終了します...")
 }
@@ -62,7 +41,7 @@ func main() {
 // NewApp は新しいAppインスタンスを作成する
 func NewApp(cfg *config.Config) *App {
 	// サービスを初期化
-	feedService := service.NewFeedService(cfg.FeedURL)
+	feedService := service.NewFeedService(cfg.FeedURLs, cfg.MaxArticlesPerFeed)
 	translatorService := service.NewTranslatorService(
 		cfg.DeepLAPIKey,
 		cfg.DeepLAPIURL,
@@ -79,7 +58,6 @@ func NewApp(cfg *config.Config) *App {
 		feedService:         feedService,
 		translatorService:   translatorService,
 		notificationService: notificationService,
-		running:             true,
 	}
 }
 
@@ -112,36 +90,12 @@ func (app *App) TestConnections() error {
 	return nil
 }
 
-// Run はメインのアプリケーションループを実行する
-func (app *App) Run(ctx context.Context) {
-	log.Printf("RSS監視を開始します (チェック間隔: %v)", app.config.CheckInterval)
+// RunOnce は一度だけRSSチェックと処理を実行する
+func (app *App) RunOnce() {
+	log.Println("過去24時間以内の新しい記事をチェックしています...")
 
-	// 起動時に一度チェックを実行
-	app.checkAndProcess()
-
-	// 定期的なチェックを開始
-	ticker := time.NewTicker(app.config.CheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("コンテキストがキャンセルされました。終了します...")
-			return
-		case <-ticker.C:
-			if app.isRunning() {
-				app.checkAndProcess()
-			}
-		}
-	}
-}
-
-// checkAndProcess はRSSフィードをチェックし、新しい記事を処理する
-func (app *App) checkAndProcess() {
-	log.Println("RSSフィードをチェックしています...")
-
-	// 新しい記事をチェック
-	newItems, err := app.feedService.CheckForNewItems()
+	// 過去24時間以内の新しい記事をチェック
+	recentItems, err := app.feedService.CheckForRecentItems()
 	if err != nil {
 		errMsg := "RSSフィードのチェックに失敗しました: " + err.Error()
 		log.Printf("ERROR: %s", errMsg)
@@ -153,33 +107,33 @@ func (app *App) checkAndProcess() {
 		return
 	}
 
-	if len(newItems) == 0 {
-		log.Println(" 新しい記事はありませんでした")
+	if len(recentItems) == 0 {
+		log.Println("過去24時間以内の新しい記事はありませんでした")
 		return
 	}
 
-	log.Printf(" %d件の新しい記事が見つかりました", len(newItems))
+	log.Printf("%d件の新しい記事が見つかりました", len(recentItems))
 
 	// 各記事を処理
 	var results []*service.TranslationResult
-	for i, item := range newItems {
-		log.Printf(" 記事 %d/%d を処理中: %s", i+1, len(newItems), item.Title)
+	for i, item := range recentItems {
+		log.Printf("記事 %d/%d を処理中: %s", i+1, len(recentItems), item.Title)
 
 		// 翻訳と要約を実行
 		result, err := app.translatorService.TranslateAndSummarize(item)
 		if err != nil {
 			errMsg := fmt.Sprintf("記事の翻訳・要約に失敗しました: %s - エラー: %v", item.Title, err)
 			log.Printf("ERROR: %s", errMsg)
-			
-			// エラー通知を送信
-			if notifyErr := app.notificationService.SendErrorNotification(errMsg); notifyErr != nil {
-				log.Printf("WARNING: エラー通知の送信に失敗: %v", notifyErr)
-			}
 			continue
 		}
 
 		results = append(results, result)
 		log.Printf("SUCCESS: 記事の処理完了: %s", result.TranslatedTitle)
+		
+		// API制限を考慮して記事間に間隔を設ける
+		if i < len(recentItems)-1 {
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	// 通知を送信
@@ -190,7 +144,7 @@ func (app *App) checkAndProcess() {
 
 // sendNotifications は処理結果に基づいて通知を送信する
 func (app *App) sendNotifications(results []*service.TranslationResult) {
-	log.Printf(" %d件の記事通知を送信します", len(results))
+	log.Printf("%d件の記事通知を送信します", len(results))
 
 	if len(results) == 1 {
 		// 単一記事の通知（設定によってスレッド形式or通常形式を選択）
@@ -200,7 +154,7 @@ func (app *App) sendNotifications(results []*service.TranslationResult) {
 				log.Printf("ERROR: %s", errMsg)
 				
 				// フォールバック: 通常の通知を試行
-				log.Println(" 通常の通知形式にフォールバックします...")
+				log.Println("通常の通知形式にフォールバックします...")
 				if err := app.notificationService.SendNewArticleNotification(results[0]); err != nil {
 					log.Printf("ERROR: フォールバック通知も失敗しました: %v", err)
 				} else {
@@ -218,71 +172,41 @@ func (app *App) sendNotifications(results []*service.TranslationResult) {
 			}
 		}
 	} else {
-		// 複数記事のバッチ通知
-		if err := app.notificationService.SendBatchNotification(results); err != nil {
-			errMsg := fmt.Sprintf("バッチ通知の送信に失敗しました: %v", err)
-			log.Printf("ERROR: %s", errMsg)
-			
-			// 個別通知にフォールバック（設定によってスレッド形式or通常形式）
-			if app.config.SlackUseThreads {
-				log.Println(" 個別スレッド通知にフォールバックします...")
-				for i, result := range results {
-					if err := app.notificationService.SendNewArticleNotificationWithThread(result); err != nil {
-						log.Printf("ERROR: 記事 %d/%d のスレッド通知送信に失敗: %v", i+1, len(results), err)
-						// さらにフォールバック: 通常の通知
-						if err := app.notificationService.SendNewArticleNotification(result); err != nil {
-							log.Printf("ERROR: 記事 %d/%d の通常通知も失敗: %v", i+1, len(results), err)
-						} else {
-							log.Printf("SUCCESS: 記事 %d/%d の通常通知を送信しました", i+1, len(results))
-						}
-					} else {
-						log.Printf("SUCCESS: 記事 %d/%d のスレッド通知を送信しました", i+1, len(results))
-					}
-					
-					// レート制限を避けるため少し待機
-					time.Sleep(2 * time.Second)
-				}
-			} else {
-				log.Println(" 個別通知にフォールバックします...")
-				for i, result := range results {
+		// 複数記事の通知
+		if app.config.SlackUseThreads {
+			log.Println("個別スレッド通知を送信します...")
+			for i, result := range results {
+				if err := app.notificationService.SendNewArticleNotificationWithThread(result); err != nil {
+					log.Printf("ERROR: 記事 %d/%d のスレッド通知送信に失敗: %v", i+1, len(results), err)
+					// フォールバック: 通常の通知
 					if err := app.notificationService.SendNewArticleNotification(result); err != nil {
-						log.Printf("ERROR: 記事 %d/%d の通知送信に失敗: %v", i+1, len(results), err)
+						log.Printf("ERROR: 記事 %d/%d の通常通知も失敗: %v", i+1, len(results), err)
 					} else {
-						log.Printf("SUCCESS: 記事 %d/%d の通知を送信しました", i+1, len(results))
+						log.Printf("SUCCESS: 記事 %d/%d の通常通知を送信しました", i+1, len(results))
 					}
-					
-					// レート制限を避けるため少し待機
-					time.Sleep(1 * time.Second)
+				} else {
+					log.Printf("SUCCESS: 記事 %d/%d のスレッド通知を送信しました", i+1, len(results))
+				}
+				
+				// レート制限を避けるため少し待機
+				if i < len(results)-1 {
+					time.Sleep(2 * time.Second)
 				}
 			}
 		} else {
-			log.Println("SUCCESS: バッチ通知を送信しました")
+			log.Println("個別通知を送信します...")
+			for i, result := range results {
+				if err := app.notificationService.SendNewArticleNotification(result); err != nil {
+					log.Printf("ERROR: 記事 %d/%d の通知送信に失敗: %v", i+1, len(results), err)
+				} else {
+					log.Printf("SUCCESS: 記事 %d/%d の通知を送信しました", i+1, len(results))
+				}
+				
+				// レート制限を避けるため少し待機
+				if i < len(results)-1 {
+					time.Sleep(1 * time.Second)
+				}
+			}
 		}
 	}
-}
-
-// handleSignals はOSシグナルを処理する
-func (app *App) handleSignals(cancel context.CancelFunc) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	sig := <-sigChan
-	log.Printf(" シグナル %v を受信しました。グレースフルシャットダウンを開始します...", sig)
-	
-	app.setRunning(false)
-	cancel()
-}
-
-// isRunning はアプリケーションが実行中かどうかを返す
-func (app *App) isRunning() bool {
-	app.mutex.RLock()
-	defer app.mutex.RUnlock()
-	return app.running
-}
-
-// setRunning はアプリケーションの実行状態を設定する
-func (app *App) setRunning(running bool) {
-	app.mutex.Lock()
-	defer app.mutex.Unlock()
-	app.running = running
 }

@@ -1,10 +1,7 @@
 package service
 
 import (
-	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,10 +10,9 @@ import (
 
 // FeedService はRSSフィードの監視を管理する
 type FeedService struct {
-	feedURL     string
-	parser      *gofeed.Parser
-	lastChecked map[string]bool // フィードアイテムの重複チェック用
-	stateFile   string          // 最後にチェックした記事の状態を保存するファイル
+	feedURLs           []string
+	maxArticlesPerFeed int
+	parser             *gofeed.Parser
 }
 
 // FeedItem は処理対象のフィードアイテム
@@ -26,140 +22,89 @@ type FeedItem struct {
 	Link        string
 	Published   time.Time
 	GUID        string
+	FeedURL     string // どのフィードからの記事かを識別
 }
 
 // NewFeedService は新しいFeedServiceを作成する
-func NewFeedService(feedURL string) *FeedService {
+func NewFeedService(feedURLs []string, maxArticlesPerFeed int) *FeedService {
 	return &FeedService{
-		feedURL:     feedURL,
-		parser:      gofeed.NewParser(),
-		lastChecked: make(map[string]bool),
-		stateFile:   "last_checked_state.txt",
+		feedURLs:           feedURLs,
+		maxArticlesPerFeed: maxArticlesPerFeed,
+		parser:             gofeed.NewParser(),
 	}
 }
 
-// CheckForNewItems は新しいRSSアイテムをチェックする
-func (fs *FeedService) CheckForNewItems() ([]*FeedItem, error) {
-	log.Printf("Checking RSS feed: %s", fs.feedURL)
+// CheckForRecentItems は過去24時間以内の新しいRSSアイテムをチェックする
+func (fs *FeedService) CheckForRecentItems() ([]*FeedItem, error) {
+	log.Printf("Checking %d RSS feeds for recent items", len(fs.feedURLs))
 	
-	// RSSフィードを取得
-	feed, err := fs.parser.ParseURL(fs.feedURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse RSS feed: %w", err)
-	}
-
-	log.Printf("Found %d items in RSS feed", len(feed.Items))
-
-	// 前回の状態を読み込み
-	if err := fs.loadState(); err != nil {
-		log.Printf("Warning: failed to load state: %v", err)
-	}
-
-	var newItems []*FeedItem
+	since := time.Now().Add(-24 * time.Hour)
+	var allRecentItems []*FeedItem
 	
-	// 各アイテムをチェック
-	for _, item := range feed.Items {
-		if item == nil {
-			continue
+	for _, feedURL := range fs.feedURLs {
+		log.Printf("Checking RSS feed: %s", feedURL)
+		
+		// RSSフィードを取得
+		feed, err := fs.parser.ParseURL(feedURL)
+		if err != nil {
+			log.Printf("Failed to parse RSS feed %s: %v", feedURL, err)
+			continue // エラーがあっても他のフィードは処理を続ける
 		}
 
-		// アイテムのユニークIDを生成（GUID or Link）
-		guid := item.GUID
-		if guid == "" {
-			guid = item.Link
+		log.Printf("Found %d items in RSS feed: %s", len(feed.Items), feedURL)
+
+		var recentItems []*FeedItem
+		
+		// 各アイテムをチェック（最大件数まで）
+		for i, item := range feed.Items {
+			if i >= fs.maxArticlesPerFeed {
+				log.Printf("Reached max articles limit (%d) for feed: %s", fs.maxArticlesPerFeed, feedURL)
+				break
+			}
+
+			if item == nil {
+				continue
+			}
+
+			// 記事の公開日時をチェック
+			var publishedTime time.Time
+			if item.PublishedParsed != nil {
+				publishedTime = *item.PublishedParsed
+			} else if item.UpdatedParsed != nil {
+				publishedTime = *item.UpdatedParsed
+			} else {
+				// 日付情報がない場合は現在時刻を使用（安全側に倒す）
+				publishedTime = time.Now()
+			}
+
+			// 過去24時間以内の記事のみ処理
+			if publishedTime.After(since) {
+				// アイテムのユニークIDを生成（GUID or Link）
+				guid := item.GUID
+				if guid == "" {
+					guid = item.Link
+				}
+
+				feedItem := &FeedItem{
+					Title:       cleanText(item.Title),
+					Description: cleanText(item.Description),
+					Link:        item.Link,
+					Published:   publishedTime,
+					GUID:        guid,
+					FeedURL:     feedURL,
+				}
+
+				recentItems = append(recentItems, feedItem)
+				log.Printf("Recent item found: %s (published: %s)", feedItem.Title, publishedTime.Format("2006-01-02 15:04:05"))
+			}
 		}
 
-		// 既にチェック済みのアイテムはスキップ
-		if fs.lastChecked[guid] {
-			continue
-		}
-
-		// 新しいアイテムとして追加
-		feedItem := &FeedItem{
-			Title:       cleanText(item.Title),
-			Description: cleanText(item.Description),
-			Link:        item.Link,
-			GUID:        guid,
-		}
-
-		// 公開日時を解析
-		if item.PublishedParsed != nil {
-			feedItem.Published = *item.PublishedParsed
-		} else if item.UpdatedParsed != nil {
-			feedItem.Published = *item.UpdatedParsed
-		} else {
-			feedItem.Published = time.Now()
-		}
-
-		newItems = append(newItems, feedItem)
-		fs.lastChecked[guid] = true
-
-		log.Printf("New item found: %s", feedItem.Title)
+		log.Printf("Found %d recent items (within 24h) from feed: %s", len(recentItems), feedURL)
+		allRecentItems = append(allRecentItems, recentItems...)
 	}
 
-	// 状態を保存
-	if err := fs.saveState(); err != nil {
-		log.Printf("Warning: failed to save state: %v", err)
-	}
-
-	log.Printf("Found %d new items", len(newItems))
-	return newItems, nil
-}
-
-// loadState は前回チェック済みのアイテムの状態を読み込む
-func (fs *FeedService) loadState() error {
-	if _, err := os.Stat(fs.stateFile); os.IsNotExist(err) {
-		// ファイルが存在しない場合は初回実行として処理
-		return nil
-	}
-
-	data, err := os.ReadFile(fs.stateFile)
-	if err != nil {
-		return fmt.Errorf("failed to read state file: %w", err)
-	}
-
-	// 改行で分割してGUIDのリストとして読み込み
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			fs.lastChecked[line] = true
-		}
-	}
-
-	log.Printf("Loaded %d checked items from state file", len(fs.lastChecked))
-	return nil
-}
-
-// saveState は現在のチェック状態を保存する
-func (fs *FeedService) saveState() error {
-	// ディレクトリが存在しない場合は作成
-	if err := os.MkdirAll(filepath.Dir(fs.stateFile), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	var guids []string
-	for guid := range fs.lastChecked {
-		guids = append(guids, guid)
-	}
-
-	// 最新1000件のみ保持（メモリ効率化）
-	if len(guids) > 1000 {
-		// 新しいマップを作成
-		newLastChecked := make(map[string]bool)
-		for i := len(guids) - 1000; i < len(guids); i++ {
-			newLastChecked[guids[i]] = true
-		}
-		fs.lastChecked = newLastChecked
-		guids = guids[len(guids)-1000:]
-	}
-
-	data := strings.Join(guids, "\n")
-	if err := os.WriteFile(fs.stateFile, []byte(data), 0644); err != nil {
-		return fmt.Errorf("failed to write state file: %w", err)
-	}
-
-	return nil
+	log.Printf("Total recent items found across all feeds: %d", len(allRecentItems))
+	return allRecentItems, nil
 }
 
 // cleanText はテキストから不要な文字を除去する
@@ -194,6 +139,6 @@ func cleanText(text string) string {
 }
 
 // GetFeedInfo はフィードの基本情報を取得する（デバッグ用）
-func (fs *FeedService) GetFeedInfo() (*gofeed.Feed, error) {
-	return fs.parser.ParseURL(fs.feedURL)
+func (fs *FeedService) GetFeedInfo(feedURL string) (*gofeed.Feed, error) {
+	return fs.parser.ParseURL(feedURL)
 }

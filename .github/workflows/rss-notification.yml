@@ -1,0 +1,47 @@
+name: RSS Notification
+
+on:
+  schedule:
+    # 毎日18時JST（UTCで9時）に実行
+    - cron: "0 9 * * *"
+  workflow_dispatch: # 手動実行も可能
+
+jobs:
+  rss-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.21"
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run RSS notification
+        env:
+          FEED_URLS: ${{ secrets.FEED_URLS }}
+          DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
+          DEEPL_API_URL: ${{ secrets.DEEPL_API_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_USE_THREADS: ${{ secrets.SLACK_USE_THREADS }}
+          LOG_LEVEL: info
+          TIMEZONE: Asia/Tokyo
+          MAX_ARTICLES_PER_FEED: 10
+        run: |
+          # アプリケーション実行（一回だけ実行して終了）
+          timeout 300 go run main.go

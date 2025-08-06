@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -14,8 +13,8 @@ import (
 // Config はアプリケーションの設定を管理する構造体
 type Config struct {
 	// RSS フィード関連
-	FeedURL         string
-	CheckInterval   time.Duration
+	FeedURLs              []string
+	MaxArticlesPerFeed    int
 	
 	// DeepL API 関連
 	DeepLAPIKey     string
@@ -44,8 +43,8 @@ func LoadConfig() *Config {
 
 	config := &Config{
 		// RSS フィード関連
-		FeedURL:         getEnvOrDefault("FEED_URL", "https://blog.bytebytego.com/feed"),
-		CheckInterval:   getDurationFromEnv("CHECK_INTERVAL_MINUTES", 30) * time.Minute,
+		FeedURLs:              getFeedURLs(),
+		MaxArticlesPerFeed:    getIntFromEnv("MAX_ARTICLES_PER_FEED", 10),
 		
 		// DeepL API 関連
 		DeepLAPIKey:     getEnvOrPanic("DEEPL_API_KEY"),
@@ -75,8 +74,8 @@ func LoadConfig() *Config {
 
 // validate は設定値の妥当性をチェックする
 func (c *Config) validate() error {
-	if c.FeedURL == "" {
-		return fmt.Errorf("FEED_URL is required")
+	if len(c.FeedURLs) == 0 {
+		return fmt.Errorf("FEED_URLS is required")
 	}
 	if c.DeepLAPIKey == "" {
 		return fmt.Errorf("DEEPL_API_KEY is required")
@@ -87,10 +86,26 @@ func (c *Config) validate() error {
 	if c.SlackWebhookURL == "" {
 		return fmt.Errorf("SLACK_WEBHOOK_URL is required")
 	}
-	if c.CheckInterval <= 0 {
-		return fmt.Errorf("CHECK_INTERVAL_MINUTES must be greater than 0")
+	if c.MaxArticlesPerFeed <= 0 {
+		return fmt.Errorf("MAX_ARTICLES_PER_FEED must be greater than 0")
 	}
 	return nil
+}
+
+// getFeedURLs は環境変数からフィードURLのリストを取得する
+func getFeedURLs() []string {
+	// 複数URLをカンマ区切りで指定可能
+	feedURLsStr := getEnvOrDefault("FEED_URLS", "https://blog.bytebytego.com/feed")
+	
+	var urls []string
+	for _, url := range strings.Split(feedURLsStr, ",") {
+		url = strings.TrimSpace(url)
+		if url != "" {
+			urls = append(urls, url)
+		}
+	}
+	
+	return urls
 }
 
 // getEnvOrDefault は環境変数の値を取得し、存在しない場合はデフォルト値を返す
@@ -110,20 +125,20 @@ func getEnvOrPanic(key string) string {
 	return value
 }
 
-// getDurationFromEnv は環境変数から数値を取得し、time.Durationに変換する
-func getDurationFromEnv(key string, defaultValue int) time.Duration {
+// getIntFromEnv は環境変数から整数値を取得する
+func getIntFromEnv(key string, defaultValue int) int {
 	valueStr := os.Getenv(key)
 	if valueStr == "" {
-		return time.Duration(defaultValue)
+		return defaultValue
 	}
 	
 	value, err := strconv.Atoi(valueStr)
 	if err != nil {
 		log.Printf("Warning: Invalid value for %s, using default: %d", key, defaultValue)
-		return time.Duration(defaultValue)
+		return defaultValue
 	}
 	
-	return time.Duration(value)
+	return value
 }
 
 // getBoolFromEnv は環境変数からブール値を取得する
