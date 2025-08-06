@@ -1,0 +1,34 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: rss-notification-app
+    volumes:
+      - .:/app
+      - go-mod-cache:/go/pkg/mod
+    environment:
+      - GO111MODULE=on
+      - CGO_ENABLED=0
+    env_file:
+      - .env
+    working_dir: /app
+    command: tail -f /dev/null # 開発時はコンテナを起動状態に保つ
+    restart: unless-stopped
+
+  # 本番用サービス（必要に応じて使用）
+  app-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: rss-notification-prod
+    env_file:
+      - .env
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  go-mod-cache:
