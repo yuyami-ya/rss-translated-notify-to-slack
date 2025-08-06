@@ -2,7 +2,7 @@
 
 ## 概要
 
-ByteByteGo の RSS フィードを監視し、新記事を自動的に日本語翻訳して Slack で通知するシステム
+ByteByteGo の RSS フィードを監視し、新記事を自動的に日本語翻訳して Slack で通知するシステム。GitHub Actions による完全無料での自動実行にも対応。
 
 ## 必要要件
 
@@ -17,8 +17,8 @@ ByteByteGo の RSS フィードを監視し、新記事を自動的に日本語�
 
 | カテゴリ                 | 環境変数                 | 説明                        | デフォルト値                              | 必須 |
 | ------------------------ | ------------------------ | --------------------------- | ----------------------------------------- | ---- |
-| **RSS フィード設定**     | `FEED_URL`               | 監視する RSS フィードの URL | `https://blog.bytebytego.com/feed`        | ❌   |
-|                          | `CHECK_INTERVAL_MINUTES` | フィードチェック間隔（分）  | `30`                                      | ❌   |
+| **RSS フィード設定**     | `FEED_URLS`              | 監視する RSS フィードの URL（複数可、カンマ区切り） | `https://blog.bytebytego.com/feed` | ❌   |
+|                          | `MAX_ARTICLES_PER_FEED`  | フィードあたりの最大記事数  | `10`                                      | ❌   |
 | **DeepL API 設定**       | `DEEPL_API_KEY`          | DeepL API キー              | -                                         | ✅   |
 |                          | `DEEPL_API_URL`          | DeepL API URL               | `https://api-free.deepl.com/v2/translate` | ❌   |
 | **OpenAI API 設定**      | `OPENAI_API_KEY`         | OpenAI API キー             | -                                         | ✅   |
@@ -108,6 +108,7 @@ make clean
 
 - [システム機能詳細](./docs/features.md)
 - [API キー取得手順](./docs/api-setup.md)
+- [GitHub Actions セットアップガイド](./docs/github-actions-setup.md)
 - [通知形式の設定](./docs/notification-formats.md)
 - [トラブルシューティング](./docs/troubleshooting.md)
 - [運用ベストプラクティス](./docs/best-practices.md)
